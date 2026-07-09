@@ -3,13 +3,15 @@ Search functionality for Instagram.
 """
 
 import time
-from typing import List, Optional
+import random
+from typing import List
 from urllib.parse import quote_plus
 
 from playwright.sync_api import TimeoutError as PWTimeout
 
-from config import TIMEOUT_ELEMENT, TIMEOUT_WAIT, SCROLL_AMOUNT, SCROLL_DELAY
-from exceptions import ElementNotFoundError
+from config import TIMEOUT_ELEMENT
+from exceptions import ElementNotFoundError, RateLimitError
+from utils import log_message  # Add this import
 
 
 class InstagramSearchScraper:
@@ -18,47 +20,112 @@ class InstagramSearchScraper:
     def __init__(self, page):
         self.page = page
     
+    def _human_like_delay(self):
+        """Add human-like delays between actions."""
+        delay = random.uniform(1.0, 3.0)
+        time.sleep(delay)
+    
+    def _check_rate_limit(self) -> bool:
+        """Check if we're being rate limited."""
+        try:
+            rate_limit_selectors = [
+                'div:has-text("Sorry, we couldn\'t find that page")',
+                'div:has-text("Too many requests")',
+                'div:has-text("Please wait a few minutes")',
+                'button:has-text("Try Again")',
+                'div:has-text("Error")',
+            ]
+            
+            for selector in rate_limit_selectors:
+                if self.page.locator(selector).count() > 0:
+                    return True
+            
+            if "challenge" in self.page.url or "login" in self.page.url:
+                return True
+                
+            return False
+            
+        except Exception:
+            return False
+    
     def search_keyword(self, keyword: str, max_results: int = 10) -> List[str]:
         """
         Search for a keyword and return media URLs.
-        
-        Args:
-            keyword: Search term (e.g., "Global warming")
-            max_results: Maximum number of media URLs to collect
-        
-        Returns:
-            List of media URLs
         """
-        # Encode keyword for URL
         encoded_keyword = quote_plus(keyword)
-        search_url = f"https://www.instagram.com/explore/tags/{encoded_keyword}/"
         
-        print(f"\n🔍 Searching for hashtag: '#{keyword}'")
-        print(f"📄 Navigating to: {search_url}")
+        # Try multiple search approaches
+        search_urls = [
+            f"https://www.instagram.com/explore/tags/{encoded_keyword}/",
+            f"https://www.instagram.com/explore/search/keyword/?q=%23{encoded_keyword}",
+            f"https://www.instagram.com/explore/search/?q=%23{encoded_keyword}",
+        ]
         
-        self.page.goto(search_url, wait_until="domcontentloaded")
+        log_message(f"\n🔍 Searching for hashtag: '#{keyword}'")
         
-        try:
-            # Wait for content to load
-            self.page.wait_for_selector('article', timeout=TIMEOUT_ELEMENT)
-            self.page.wait_for_timeout(TIMEOUT_WAIT)
-            
-        except PWTimeout:
-            raise ElementNotFoundError(
-                f"No content found for '#{keyword}'. The hashtag might not exist."
-            )
+        for search_url in search_urls:
+            try:
+                log_message(f"📄 Trying: {search_url}")
+                self.page.goto(search_url, wait_until="domcontentloaded")
+                self._human_like_delay()
+                
+                if self._check_rate_limit():
+                    log_message(f"  ⚠️ Rate limited! Waiting...", "WARNING")
+                    time.sleep(30)
+                    continue
+                
+                # Try multiple selectors for content
+                content_found = False
+                selectors = [
+                    'article',
+                    'a[href*="/p/"]',
+                    'a[href*="/reel/"]',
+                    'div[class*="post"]',
+                    'div[class*="photo"]',
+                    'section[role="presentation"]',
+                    'main',
+                    'div[class*="grid"]'
+                ]
+                
+                for selector in selectors:
+                    try:
+                        self.page.wait_for_selector(selector, timeout=5000)
+                        count = self.page.locator(selector).count()
+                        if count > 0:
+                            log_message(f"  ✅ Found content with selector: {selector} ({count} elements)")
+                            content_found = True
+                            break
+                    except:
+                        continue
+                
+                if content_found:
+                    urls = self._collect_media_urls(max_results)
+                    if urls:
+                        log_message(f"✅ Found {len(urls)} media URLs for '#{keyword}'")
+                        return urls
+                
+            except Exception as e:
+                log_message(f"  ❌ Error with {search_url}: {e}", "DEBUG")
+                continue
         
-        # Collect media URLs
+        raise ElementNotFoundError(
+            f"No content found for '#{keyword}'. The hashtag might not exist or you're being rate limited."
+        )
+    
+    def _collect_media_urls(self, max_results: int) -> List[str]:
+        """Collect media URLs from the page."""
         media_urls = []
         seen_urls = set()
         attempts = 0
-        max_attempts = min(max_results // 2 + 5, 20)
+        max_attempts = min(max_results // 2 + 5, 10)
+        no_new_urls_count = 0
         
-        print(f"📥 Collecting up to {max_results} media URLs...")
+        log_message(f"📥 Collecting up to {max_results} media URLs...")
         
         while len(media_urls) < max_results and attempts < max_attempts:
-            # Find all media links
-            links = self.page.locator('article a[href*="/p/"], article a[href*="/reel/"]').all()
+            links = self.page.locator('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]').all()
+            
+            new_urls_found = 0
             
             for link in links:
                 try:
@@ -66,105 +133,43 @@ class InstagramSearchScraper:
                     if not href:
                         continue
                     
-                    # Skip ads and sponsored content
-                    if "/ad/" in href or "/explore/" in href:
+                    if "/ad/" in href or "/explore/" in href or "/accounts/" in href:
                         continue
                     
-                    # Ensure it's a media URL
-                    if "/p/" in href or "/reel/" in href or "/tv/" in href:
-                        # Get the full URL
-                        if href.startswith("/"):
-                            href = f"https://www.instagram.com{href}"
-                        
-                        # Clean URL
-                        href = href.split('?')[0]
-                        
-                        if href not in seen_urls:
-                            seen_urls.add(href)
-                            media_urls.append(href)
-                            
-                            if len(media_urls) >= max_results:
-                                break
-                                
-                except Exception:
-                    continue
-            
-            # Scroll to load more
-            self.page.mouse.wheel(0, SCROLL_AMOUNT)
-            self.page.wait_for_timeout(SCROLL_DELAY)
-            attempts += 1
-            
-            print(f"  [{len(media_urls)}/{max_results}] URLs collected "
-                  f"(attempt {attempts}/{max_attempts})")
-        
-        print(f"✅ Found {len(media_urls)} media URLs for '#{keyword}'")
-        return media_urls
-    
-    def search_users(self, keyword: str, max_results: int = 10) -> List[str]:
-        """
-        Search for users by keyword.
-        
-        Args:
-            keyword: Search term
-            max_results: Maximum number of profiles to collect
-        
-        Returns:
-            List of profile URLs
-        """
-        encoded_keyword = quote_plus(keyword)
-        search_url = f"https://www.instagram.com/explore/search/?q={encoded_keyword}"
-        
-        print(f"\n🔍 Searching for users: '{keyword}'")
-        print(f"📄 Navigating to: {search_url}")
-        
-        self.page.goto(search_url, wait_until="domcontentloaded")
-        
-        try:
-            self.page.wait_for_selector('article', timeout=TIMEOUT_ELEMENT)
-            self.page.wait_for_timeout(TIMEOUT_WAIT)
-        except PWTimeout:
-            raise ElementNotFoundError(f"No users found for '{keyword}'.")
-        
-        # Switch to users tab
-        try:
-            users_tab = self.page.locator('a:has-text("Users")').first
-            if users_tab.count() > 0:
-                users_tab.click()
-                self.page.wait_for_timeout(TIMEOUT_WAIT)
-        except Exception:
-            pass
-        
-        # Collect user URLs
-        user_urls = []
-        seen_urls = set()
-        attempts = 0
-        
-        while len(user_urls) < max_results and attempts < 10:
-            # Find user links
-            links = self.page.locator('article a[href^="/"]').all()
-            
-            for link in links:
-                try:
-                    href = link.get_attribute("href")
-                    if not href or "/explore/" in href:
-                        continue
-                    
-                    if href.startswith("/") and len(href) > 1:
+                    if href.startswith("/"):
                         href = f"https://www.instagram.com{href}"
+                    
+                    href = href.split('?')[0]
                     
                     if href not in seen_urls:
                         seen_urls.add(href)
-                        user_urls.append(href)
+                        media_urls.append(href)
+                        new_urls_found += 1
                         
-                        if len(user_urls) >= max_results:
+                        if len(media_urls) >= max_results:
                             break
                             
                 except Exception:
                     continue
             
-            self.page.mouse.wheel(0, SCROLL_AMOUNT)
-            self.page.wait_for_timeout(SCROLL_DELAY)
-            attempts += 1
+            log_message(f"  [{len(media_urls)}/{max_results}] URLs collected "
+                  f"(found {new_urls_found} new, attempt {attempts + 1}/{max_attempts})")
+            
+            if new_urls_found == 0:
+                no_new_urls_count += 1
+                if no_new_urls_count >= 3:
+                    self.page.mouse.wheel(0, random.randint(500, 1200))
+                    self._human_like_delay()
+            else:
+                no_new_urls_count = 0
+            
+            if len(media_urls) < max_results:
+                self.page.mouse.wheel(0, random.randint(300, 600))
+                self._human_like_delay()
+                attempts += 1
+            
+            if no_new_urls_count >= 5:
+                log_message(f"  📌 No new URLs found. Stopping collection.")
+                break
         
-        print(f"✅ Found {len(user_urls)} user profiles")
-        return user_urls
+        return media_urls

@@ -16,9 +16,8 @@ class InstagramMedia:
     like_count: str = "0"
     comment_count: str = "0"
     view_count: str = "0"  # For reels/videos
-    author: Optional[str] = None
-    author_username: Optional[str] = None
-    media_type: str = "reel"  # "reel", "post", "video"
+    author: Optional[str] = None  # Only one author field
+    media_type: str = "post"  # "reel", "post", "video"
     hashtags: List[str] = field(default_factory=list)
     mentions: List[str] = field(default_factory=list)
     links: List[str] = field(default_factory=list)  # URLs in caption

@@ -4,15 +4,18 @@ Orchestrates Instagram search and data collection.
 
 import json
 import time
+import random
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 
 from browser_manager import BrowserManager
 from scraper import InstagramScraper
 from search_scraper import InstagramSearchScraper
 from models import SearchResult
 from exporters import DataExporter
-from config import DEFAULT_MAX_REELS, DEFAULT_REPLIES
+from config import DEFAULT_MAX_REELS
+from exceptions import RateLimitError
+from utils import log_message  # Add this import
 
 
 class InstagramDataCollector:
@@ -28,29 +31,16 @@ class InstagramDataCollector:
     
     def collect_for_keyword(self, keyword: str, 
                            max_media: int = DEFAULT_MAX_REELS,
-                           max_comments: int = DEFAULT_REPLIES,
                            auto_export: bool = True) -> SearchResult:
-        """
-        Collect data for a single keyword/hashtag.
+        """Collect data for a single keyword/hashtag."""
+        log_message(f"\n{'='*60}")
+        log_message(f"  COLLECTING DATA FOR: '#{keyword}'")
+        log_message(f"{'='*60}")
         
-        Args:
-            keyword: Search term (hashtag without #)
-            max_media: Number of media items to collect
-            max_comments: Number of comments per media
-            auto_export: Automatically export results
-        
-        Returns:
-            SearchResult object with collected data
-        """
-        print(f"\n{'='*60}")
-        print(f"  COLLECTING DATA FOR: '#{keyword}'")
-        print(f"{'='*60}")
-        
-        # Step 1: Search and get URLs
         media_urls = self.search_scraper.search_keyword(keyword, max_media)
         
         if not media_urls:
-            print(f"⚠️  No media found for '#{keyword}'")
+            log_message(f"⚠️  No media found for '#{keyword}'")
             return SearchResult(
                 keyword=keyword,
                 scraped_at=datetime.now().isoformat(),
@@ -59,30 +49,27 @@ class InstagramDataCollector:
                 media_data=[]
             )
         
-        # Step 2: Scrape each media
         collected_data = []
         failed_urls = []
         
         for i, url in enumerate(media_urls, 1):
-            print(f"\n📌 [{i}/{len(media_urls)}] Processing: {url}")
+            log_message(f"\n📌 [{i}/{len(media_urls)}] Processing: {url}")
             
             try:
-                media_data = self.scraper.scrape_media(url, max_comments)
+                media_data = self.scraper.scrape_media(url)
                 collected_data.append(media_data)
-                print(f"  ✅ Collected: {len(media_data.get('comments', []))} comments")
+                log_message(f"  ✅ Collected metadata for: {media_data.get('media_type')} by @{media_data.get('author_username')}")
                 
             except Exception as e:
-                print(f"  ❌ Error scraping {url}: {e}")
+                log_message(f"  ❌ Error scraping {url}: {e}", "ERROR")
                 failed_urls.append(url)
                 continue
             
-            # Wait between requests
             if i < len(media_urls):
-                wait_time = 3
-                print(f"  ⏳ Waiting {wait_time} seconds...")
+                wait_time = random.uniform(3, 7)
+                log_message(f"  ⏳ Waiting {wait_time:.1f} seconds...")
                 time.sleep(wait_time)
         
-        # Step 3: Create search result
         result = SearchResult(
             keyword=keyword,
             scraped_at=datetime.now().isoformat(),
@@ -91,53 +78,43 @@ class InstagramDataCollector:
             media_data=collected_data
         )
         
-        # Step 4: Auto-export if requested
         if auto_export and collected_data:
-            print(f"\n📤 Exporting data...")
+            log_message(f"\n📤 Exporting data...")
             exported_files = self.exporter.export_search_result(
                 result, 
                 self.export_formats,
                 platform="instagram"
             )
-            print(f"  ✅ Exported {len(exported_files)} files")
+            log_message(f"  ✅ Exported {len(exported_files)} files")
         
-        # Print summary
-        print(f"\n📊 Summary for '#{keyword}':")
-        print(f"  • Total media found: {result.total_media_found}")
-        print(f"  • Successfully scraped: {result.media_collected}")
-        print(f"  • Failed: {len(failed_urls)}")
-        if failed_urls:
-            print(f"  • Failed URLs: {failed_urls[:3]}{'...' if len(failed_urls) > 3 else ''}")
+        log_message(f"\n📊 Summary for '#{keyword}':")
+        log_message(f"  • Total media found: {result.total_media_found}")
+        log_message(f"  • Successfully scraped: {result.media_collected}")
+        log_message(f"  • Failed: {len(failed_urls)}")
         
         return result
     
     def collect_multiple_keywords(self, keywords: List[str],
-                                 max_media: int = DEFAULT_MAX_REELS,
-                                 max_comments: int = DEFAULT_REPLIES) -> Dict[str, SearchResult]:
-        """
-        Collect data for multiple keywords.
-        """
+                                 max_media: int = DEFAULT_MAX_REELS) -> Dict[str, SearchResult]:
+        """Collect data for multiple keywords."""
         results = {}
         
         for i, keyword in enumerate(keywords, 1):
-            print(f"\n{'#'*60}")
-            print(f"  KEYWORD {i}/{len(keywords)}")
-            print(f"{'#'*60}")
+            log_message(f"\n{'#'*60}")
+            log_message(f"  KEYWORD {i}/{len(keywords)}")
+            log_message(f"{'#'*60}")
             
-            result = self.collect_for_keyword(keyword, max_media, max_comments)
+            result = self.collect_for_keyword(keyword, max_media)
             results[keyword] = result
             
-            # Save individual result
             if result.media_data:
                 self._save_search_result(result)
             
-            # Wait between keywords
             if keyword != keywords[-1]:
-                wait_time = 5
-                print(f"\n⏳ Waiting {wait_time} seconds before next keyword...")
+                wait_time = random.uniform(5, 10)
+                log_message(f"\n⏳ Waiting {wait_time:.1f} seconds before next keyword...")
                 time.sleep(wait_time)
         
-        # Export batch summary
         self._export_batch_summary(results)
         
         return results
@@ -159,7 +136,7 @@ class InstagramDataCollector:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2, ensure_ascii=False)
         
-        print(f"  💾 JSON saved to: {filename}")
+        log_message(f"  💾 JSON saved to: {filename}")
     
     def _export_batch_summary(self, results: Dict[str, SearchResult]):
         """Export a summary CSV of all collected data."""
@@ -172,25 +149,25 @@ class InstagramDataCollector:
                 'keyword',
                 'total_media_found',
                 'media_collected',
-                'total_comments_collected',
                 'total_likes',
+                'total_comments',
                 'total_views',
                 'scraped_at'
             ])
             
             for keyword, result in results.items():
-                total_comments = sum(len(media.get('comments', [])) for media in result.media_data)
                 total_likes = sum(int(media.get('like_count', '0')) for media in result.media_data)
+                total_comments = sum(int(media.get('comment_count', '0')) for media in result.media_data)
                 total_views = sum(int(media.get('view_count', '0')) for media in result.media_data)
                 
                 writer.writerow([
                     keyword,
                     result.total_media_found,
                     result.media_collected,
-                    total_comments,
                     total_likes,
+                    total_comments,
                     total_views,
                     result.scraped_at
                 ])
         
-        print(f"\n📊 Batch summary saved to: {summary_file}")
+        log_message(f"\n📊 Batch summary saved to: {summary_file}")
