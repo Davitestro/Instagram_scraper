@@ -1,5 +1,5 @@
 """
-Main entry point for Instagram scraper - simplified.
+Main entry point for Instagram scraper - Profile mode.
 """
 
 import sys
@@ -12,10 +12,10 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from config import CDP_PORT, DEFAULT_REPLIES, DEFAULT_MAX_REELS
+    from config import CDP_PORT, DEFAULT_MAX_REELS
     from utils import log_message, init_log_file
 except ImportError:
-    from config import CDP_PORT, DEFAULT_REPLIES
+    from config import CDP_PORT
     DEFAULT_MAX_REELS = 10
     
     def log_message(message: str, level: str = "INFO"):
@@ -41,13 +41,12 @@ except ImportError as e:
 
 def main():
     """Main entry point."""
-    # Initialize log file first
     log_file = init_log_file()
     
     args = parse_arguments()
     
     log_message("=" * 60, "START")
-    log_message("  Instagram Data Collector (Simplified)", "START")
+    log_message("  Instagram Profile Scraper", "START")
     log_message("=" * 60, "START")
     log_message(f"📁 Log file: {log_file}", "INFO")
     
@@ -70,33 +69,40 @@ def main():
         log_message("✅ Login verified", "SUCCESS")
         
         # Execute based on mode
-        if args.search:
-            log_message(f"🔍 STEP 4: Starting search for '#{args.search}'...", "STEP")
-            log_message(f"📊 Settings: max_media={args.max_media}", "INFO")
+        if args.profile:
+            log_message(f"👤 STEP 4: Starting profile scrape for '@{args.profile}'...", "STEP")
+            log_message(f"📊 Settings: max_posts={args.max_posts}", "INFO")
             
             collector = InstagramDataCollector(
                 browser_manager, 
                 export_formats=args.export_formats.split(',') if args.export_formats else ["json", "csv"]
             )
             
-            # Remove max_comments parameter - it's not used anymore
-            result = collector.collect_for_keyword(
-                args.search,
-                max_media=args.max_media,
+            result = collector.collect_from_profile(
+                args.profile,
+                max_posts=args.max_posts,
                 auto_export=True
             )
             
-            log_message(f"✅ Completed search for '#{args.search}'", "SUCCESS")
-            display_search_result(result)
+            log_message(f"✅ Completed scraping '@{args.profile}'", "SUCCESS")
+            display_result(result)
             
-        elif args.url:
-            log_message(f"📄 STEP 4: Scraping media: {args.url}", "STEP")
-            data = scraper.scrape_media(args.url)
-            display_results(data)
+        elif args.profile_file:
+            log_message(f"📋 STEP 4: Reading profiles from file...", "STEP")
+            profiles = read_profiles_from_file(args.profile_file)
+            log_message(f"📊 Found {len(profiles)} profiles", "INFO")
             
-            from utils import save_result
-            filename = save_result(data, platform="instagram")
-            log_message(f"💾 Data saved to: {filename}", "SUCCESS")
+            collector = InstagramDataCollector(
+                browser_manager, 
+                export_formats=args.export_formats.split(',') if args.export_formats else ["json", "csv"]
+            )
+            
+            results = collector.collect_multiple_profiles(
+                profiles,
+                max_posts=args.max_posts
+            )
+            
+            log_message(f"✅ Completed scraping {len(profiles)} profiles", "SUCCESS")
         
         else:
             log_message("❌ ERROR: No command specified", "ERROR")
@@ -104,10 +110,10 @@ def main():
             print("  ❌ ERROR: No command specified")
             print("="*60)
             print("\nPlease specify one of the following:")
-            print("\n  📌 Search by hashtag:")
-            print("    python3 main.py --search 'GlobalWarming' --max-media 3")
-            print("\n  📌 Scrape single media:")
-            print("    python3 main.py https://www.instagram.com/reel/xxx/")
+            print("\n  📌 Scrape a single profile:")
+            print("    python3 main.py --profile 'username' --max-posts 5")
+            print("\n  📌 Scrape multiple profiles from file:")
+            print("    python3 main.py --profile-file profiles.txt --max-posts 3")
             print("\n  📌 For help:")
             print("    python3 main.py --help")
             print("="*60)
@@ -127,23 +133,29 @@ def main():
 def parse_arguments():
     """Parse command line arguments."""
     ap = argparse.ArgumentParser(
-        description="Scrape Instagram - metadata only (no comments)",
+        description="Scrape Instagram posts from user profiles",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 EXAMPLES:
-  # Search by hashtag
-  python3 main.py --search "GlobalWarming" --max-media 3
+  # Scrape a single profile
+  python3 main.py --profile "pubity" --max-posts 5
   
-  # Scrape single reel
-  python3 main.py https://www.instagram.com/reel/CxYz123ABCD/
+  # Scrape multiple profiles from file
+  python3 main.py --profile-file profiles.txt --max-posts 3
+  
+  # Profile file format (one username per line):
+  pubity
+  elonmusk
+  natgeo
         """
     )
     
-    ap.add_argument("url", nargs="?", help="Instagram media URL to scrape")
-    ap.add_argument("--search", "-s", type=str, 
-                   help="Hashtag to search (without #, e.g., 'GlobalWarming')")
-    ap.add_argument("--max-media", "-m", type=int, default=10,
-                   help="Maximum media to collect (default: 10)")
+    ap.add_argument("--profile", "-p", type=str, 
+                   help="Instagram username to scrape (without @)")
+    ap.add_argument("--profile-file", "-f", type=str,
+                   help="File containing usernames (one per line)")
+    ap.add_argument("--max-posts", "-m", type=int, default=DEFAULT_MAX_REELS,
+                   help=f"Maximum posts to collect per profile (default: {DEFAULT_MAX_REELS})")
     ap.add_argument("--export-formats", "-e", type=str, default="json,csv",
                    help="Export formats: json,csv (default: json,csv)")
     
@@ -173,23 +185,25 @@ def setup_browser(browser_manager: BrowserManager):
         log_message(f"✅ Chrome found running on port {CDP_PORT}", "SUCCESS")
 
 
-def display_results(data: dict):
-    """Display results in a formatted way."""
-    print("\n" + "="*60)
-    print("  RESULTS")
-    print("="*60)
-    
-    import json
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+def read_profiles_from_file(filename: str) -> list[str]:
+    """Read usernames from a text file (one per line)."""
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            profiles = [line.strip() for line in f if line.strip()]
+        log_message(f"📖 Read {len(profiles)} profiles from {filename}")
+        return profiles
+    except FileNotFoundError:
+        log_message(f"❌ File not found: {filename}", "ERROR")
+        sys.exit(1)
 
 
-def display_search_result(result):
+def display_result(result):
     """Display search result summary."""
     print("\n" + "="*60)
-    print(f"  SEARCH RESULTS: '#{result.keyword}'")
+    print(f"  PROFILE RESULTS: @{result.keyword}")
     print("="*60)
-    print(f"  Total media found: {result.total_media_found}")
-    print(f"  Media collected: {result.media_collected}")
+    print(f"  Total posts found: {result.total_media_found}")
+    print(f"  Posts collected: {result.media_collected}")
     print(f"  Scraped at: {result.scraped_at}")
     print("="*60)
 
